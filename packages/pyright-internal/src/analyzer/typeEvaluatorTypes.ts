@@ -472,6 +472,11 @@ export interface MatchArgsToParamsResult {
     argumentMatchScore: number;
 }
 
+export interface MatchCallArgsToParams {
+    match: MatchArgsToParamsResult,
+    type: FunctionType,
+}
+
 export interface TypeEvaluator {
     runWithCancellationToken<T>(token: CancellationToken, callback: () => T): T;
 
@@ -603,7 +608,7 @@ export interface TypeEvaluator {
         recursionCount?: number
     ) => FunctionType | OverloadedFunctionType | undefined;
     getCallSignatureInfo: (node: CallNode, activeIndex: number, activeOrFake: boolean) => CallSignatureInfo | undefined;
-    matchCallArgsToParams: (callNode: CallNode) => MatchArgsToParamsResult[] | undefined;
+    matchCallArgsToParams: (callNode: CallNode) => MatchCallArgsToParams[] | undefined;
     getAbstractSymbols: (classType: ClassType) => AbstractSymbol[];
     narrowConstrainedTypeVar: (node: ParseNode, typeVar: TypeVarType) => Type | undefined;
 
