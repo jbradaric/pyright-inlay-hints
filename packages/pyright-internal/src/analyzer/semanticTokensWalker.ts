@@ -1,10 +1,11 @@
 import { ParseTreeWalker } from './parseTreeWalker';
 import { TypeEvaluator } from './typeEvaluatorTypes';
-import { ClassTypeFlags, FunctionType, OverloadedFunctionType, TypeCategory, TypeFlags } from './types';
-import { ClassNode, FunctionNode, ImportAsNode, ImportFromNode, NameNode } from '../parser/parseNodes';
+import { FunctionType, OverloadedFunctionType, Type, TypeCategory, TypeFlags } from './types';
+import { ClassNode, FunctionNode, ImportAsNode, ImportFromNode, ImportFromAsNode, NameNode } from '../parser/parseNodes';
 import { SemanticTokenModifiers, SemanticTokenTypes } from 'vscode-languageserver';
+import { isConstantName } from './symbolNameUtils';
 
-type SemanticTokenItem = {
+export type SemanticTokenItem = {
     type: string;
     modifiers: string[];
     start: number;
@@ -27,25 +28,10 @@ export class SemanticTokensWalker extends ParseTreeWalker {
         if (node.isAsync) {
             modifiers.push(SemanticTokenModifiers.async);
         }
-        if ((node as any).declaration.isMethod) {
+        if ((node as any).declaration?.isMethod) {
             this._addItem(node.name.start, node.name.length, SemanticTokenTypes.method, modifiers);
         } else {
             this._addItem(node.name.start, node.name.length, SemanticTokenTypes.function, modifiers);
-        }
-        for (const param of node.parameters) {
-            if (!param.name) {
-                continue;
-            }
-            const modifiers = [SemanticTokenModifiers.declaration];
-            this._addItem(param.start, param.name!.value.length, SemanticTokenTypes.parameter, modifiers);
-            if (param.typeAnnotation) {
-                this._addItem(
-                    param.typeAnnotation.start,
-                    param.typeAnnotation.length,
-                    SemanticTokenTypes.typeParameter,
-                    []
-                );
-            }
         }
         return super.visitFunction(node);
     }
@@ -60,6 +46,11 @@ export class SemanticTokensWalker extends ParseTreeWalker {
         return super.visitImportAs(node);
     }
 
+    override visitImportFromAs(node: ImportFromAsNode): boolean {
+        this._visitNameWithType(node.name, this._evaluator?.getType(node.alias ?? node.name));
+        return super.visitImportFromAs(node);
+    }
+
     override visitImportFrom(node: ImportFromNode): boolean {
         for (const part of node.module.nameParts) {
             this._addItem(part.start, part.length, SemanticTokenTypes.namespace, []);
@@ -68,17 +59,23 @@ export class SemanticTokensWalker extends ParseTreeWalker {
     }
 
     override visitName(node: NameNode): boolean {
-        const type = this._evaluator?.getType(node);
+        this._visitNameWithType(node, this._evaluator?.getType(node));
+        return super.visitName(node);
+    }
+
+    private _visitNameWithType(node: NameNode, type: Type | undefined) {
         switch (type?.category) {
             case TypeCategory.Function:
-                {
+                if (type.flags & TypeFlags.Instance) {
                     if ((type as FunctionType).details.declaration?.isMethod) {
                         this._addItem(node.start, node.length, SemanticTokenTypes.method, []);
                     } else {
                         this._addItem(node.start, node.length, SemanticTokenTypes.function, []);
                     }
+                } else {
+                    this._addItem(node.start, node.length, SemanticTokenTypes.type, []);
                 }
-                break;
+                return;
 
             case TypeCategory.OverloadedFunction:
                 {
@@ -89,36 +86,45 @@ export class SemanticTokensWalker extends ParseTreeWalker {
                         this._addItem(node.start, node.length, SemanticTokenTypes.function, []);
                     }
                 }
-                break;
+                return;
 
             case TypeCategory.Module:
                 this._addItem(node.start, node.length, SemanticTokenTypes.namespace, []);
+                return;
+            case TypeCategory.Unbound:
+            case TypeCategory.Unknown:
+            case undefined:
+                return;
+            case TypeCategory.TypeVar:
+                if (!(type.flags & TypeFlags.Instance)) {
+                    this._addItem(node.start, node.length, SemanticTokenTypes.typeParameter, []);
+                    return;
+                }
                 break;
             case TypeCategory.Union:
-                this._addItem(node.start, node.length, SemanticTokenTypes.type, []);
-                break;
-            case TypeCategory.Unbound:
-            case undefined:
-                break;
-            case TypeCategory.TypeVar:
-                this._addItem(node.start, node.length, SemanticTokenTypes.typeParameter, []);
+                if (!(type.flags & TypeFlags.Instance)) {
+                    this._addItem(node.start, node.length, SemanticTokenTypes.type, []);
+                    return;
+                }
                 break;
             case TypeCategory.Class:
                 if (!(type.flags & TypeFlags.Instance)) {
                     this._addItem(node.start, node.length, SemanticTokenTypes.class, []);
-                    break;
-                }
-            // eslint-disable-next-line no-fallthrough -- intentional
-            default:
-                if ((type && type.flags & ClassTypeFlags.Final) || node.value.toUpperCase() === node.value) {
-                    this._addItem(node.start, node.length, SemanticTokenTypes.variable, [
-                        SemanticTokenModifiers.readonly,
-                    ]);
-                } else {
-                    this._addItem(node.start, node.length, SemanticTokenTypes.variable, []);
+                    return;
                 }
         }
-        return super.visitName(node);
+
+        const symbol = this._evaluator?.lookUpSymbolRecursive(node, node.value, false)?.symbol;
+        if (type?.category === TypeCategory.Never && symbol && !this._evaluator?.getDeclaredTypeOfSymbol(symbol).type) {
+            // for some reason Never is considered both instantiable and an instance, so we need to
+            // look up the type this way to differentiate between "instances" of `Never` and type
+            // aliases/annotations of Never:
+            this._addItem(node.start, node.length, SemanticTokenTypes.type, []);
+        } else if (isConstantName(node.value) || (symbol && this._evaluator?.isFinalVariable(symbol))) {
+            this._addItem(node.start, node.length, SemanticTokenTypes.variable, [SemanticTokenModifiers.readonly]);
+        } else {
+            this._addItem(node.start, node.length, SemanticTokenTypes.variable, []);
+        }
     }
 
     private _addItem(start: number, length: number, type: string, modifiers: string[]) {

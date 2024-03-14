@@ -63,7 +63,7 @@ export class SemanticTokensProvider {
         this._parseResults = this._program.getParseResults(this._fileUri);
     }
 
-    async onSemanticTokens(): Promise<SemanticTokens> {
+    onSemanticTokens(): SemanticTokens {
         const builder = new SemanticTokensBuilder();
         if (!this._parseResults) {
             return builder.build();
@@ -73,6 +73,9 @@ export class SemanticTokensProvider {
         walker.walk(this._parseResults.parseTree);
 
         throwIfCancellationRequested(this._token);
+
+        // seems that tokens are lost if they show up out of order.
+        walker.items.sort((a, b) => a.start - b.start);
 
         for (const item of walker.items) {
             const range = convertOffsetsToRange(
